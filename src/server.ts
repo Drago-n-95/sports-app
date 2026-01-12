@@ -2,7 +2,8 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
-import { readFollows, writeFollows } from "./storage";
+import { getFollows, setFollows, clearFollows } from "./storage";
+
 
 console.log("BOOT sports-app-api v1 - server.ts loaded");
 dotenv.config();
@@ -151,78 +152,144 @@ app.get("/teams/:teamId/schedule", async (req, res) => {
 });
 
 
-// --- Followed teams (MVP "single device profile") ---
+// Replace entire follows API with per-client follows
 
-// Set followed teams
+// --- Followed teams (per-device via X-Client-Id) ---
+
+// SET followed teams (overwrites)
 app.post("/me/follows", (req, res) => {
+  const clientId = requireClientId(req);
   const teamIds = req.body?.teamIds;
   if (!Array.isArray(teamIds)) {
     return res.status(400).json({ error: "Body must be { teamIds: string[] }" });
   }
-  writeFollows(teamIds);
-  res.json({ ok: true, teamIds: Array.from(new Set(teamIds.map(String))) });
+  setFollows(clientId, teamIds.map(String));
+  res.json({ ok: true, teamIds: getFollows(clientId) });
 });
 
-// Get followed teams (team objects)
-app.get("/me/follows", async (_req, res) => {
-  const { teamIds } = readFollows();
-  const teams: any[] = [];
 
+// ADD followed teams (appends)
+app.post("/me/follows/add", (req, res) => {
+  const clientId = requireClientId(req);
+  const teamIds = req.body?.teamIds;
+
+  if (!Array.isArray(teamIds)) {
+    return res.status(400).json({ error: "Body must be { teamIds: string[] }" });
+  }
+
+  const current = getFollows(clientId);
+  setFollows(clientId, [...current, ...teamIds.map(String)]);
+  res.json({ ok: true, teamIds: getFollows(clientId) });
+});
+
+// GET followed teams (IDs + team objects)
+app.get("/me/follows", async (req, res) => {
+  const clientId = requireClientId(req);
+  const teamIds = getFollows(clientId);
+
+  const teams: any[] = [];
   for (const id of teamIds) {
     try {
       const data = await get<any>(`/lookupteam.php?id=${encodeURIComponent(id)}`, 3600);
       const t = data?.teams?.[0];
       if (t) teams.push(normalizeTeam(t));
     } catch {
-      // ignore individual failures for resilience
+      // ignore
     }
   }
+
   res.json({ teamIds, teams });
 });
 
+
 // Aggregated "feed" for Schedule tab: last + next per followed team
-app.get("/me/feed", async (_req, res) => {
-  const { teamIds } = readFollows();
+app.get("/me/feed", async (req, res) => {
+  try {
+    const clientId = requireClientId(req);
+    const teamIds = getFollows(clientId);
 
-  const items = [];
-  for (const teamId of teamIds) {
-    try {
-      const [teamData, nextData, lastData] = await Promise.all([
-        get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600),
-        get<any>(`/eventsnext.php?id=${encodeURIComponent(teamId)}`, 120),
-        get<any>(`/eventslast.php?id=${encodeURIComponent(teamId)}`, 300),
-      ]);
+    if (!teamIds.length) return res.json({ items: [] });
 
-      const team = teamData?.teams?.[0] ? normalizeTeam(teamData.teams[0]) : { id: teamId };
-      const next = (nextData?.events || []).map(normalizeEvent);
-      const last = (lastData?.results || lastData?.events || []).map(normalizeEvent);
+    const season = String(req.query.season || "2025-2026").trim();
+
+    const items = [];
+
+    for (const teamId of teamIds) {
+      // 1) Team details
+      const teamData = await get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600);
+      const t = teamData?.teams?.[0];
+      if (!t) {
+        items.push({ team: { id: teamId }, next: null, last: null });
+        continue;
+      }
+      const team = normalizeTeam(t);
+
+      // 2) League season events (then FILTER to this team)
+      const seasonData = await get<any>(
+        `/eventsseason.php?id=${encodeURIComponent(team.leagueId)}&s=${encodeURIComponent(season)}`,
+        900
+      );
+
+      const eventsAll = (seasonData?.events || []).map(normalizeEvent);
+      const events = eventsAll.filter(
+        (e: any) => e.homeTeam?.id === teamId || e.awayTeam?.id === teamId
+      );
+
+      // 3) Compute last + next (single events)
+      const parsed = events
+        .map((e: any) => {
+          const time = (e.time || "00:00:00").slice(0, 8);
+          const dt = e.date ? new Date(`${e.date}T${time}`) : null;
+          return { ...e, dt };
+        })
+        .filter((e: any) => e.dt && !isNaN(e.dt.getTime()))
+        .sort((a: any, b: any) => a.dt.getTime() - b.dt.getTime());
+
+      const now = new Date();
+      const next = parsed.find((e: any) => e.dt >= now) ?? null;
+      const last = [...parsed].reverse().find((e: any) => e.dt < now) ?? null;
 
       items.push({ team, next, last });
-    } catch {
-      items.push({ team: { id: teamId }, next: [], last: [] });
     }
-  }
 
-  res.json({ items });
+    res.json({ items });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message ?? String(e) });
+  }
 });
 
-// Aggregated season schedule for all followed teams
+
+
 app.get("/me/schedule", async (req, res) => {
+  const clientId = requireClientId(req);
   const season = String(req.query.season || "").trim();
   if (!season) return res.status(400).json({ error: "Missing query param: season" });
 
-  const { teamIds } = readFollows();
-
+  const teamIds = getFollows(clientId);
   const schedules = [];
+
   for (const teamId of teamIds) {
     try {
-      const [teamData, seasonData] = await Promise.all([
-        get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600),
-        get<any>(`/eventsseason.php?id=${encodeURIComponent(teamId)}&s=${encodeURIComponent(season)}`, 900),
-      ]);
+      // team lookup (to get leagueId)
+      const teamData = await get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600);
+      const t = teamData?.teams?.[0];
+      if (!t) {
+        schedules.push({ team: { id: teamId }, season, events: [] });
+        continue;
+      }
 
-      const team = teamData?.teams?.[0] ? normalizeTeam(teamData.teams[0]) : { id: teamId };
-      const events = (seasonData?.events || []).map(normalizeEvent);
+      const team = normalizeTeam(t);
+
+      // league season events, then filter to the team
+      const seasonData = await get<any>(
+        `/eventsseason.php?id=${encodeURIComponent(team.leagueId)}&s=${encodeURIComponent(season)}`,
+        900
+      );
+
+      const eventsAll = (seasonData?.events || []).map(normalizeEvent);
+      const events = eventsAll.filter(
+        (e: any) => e.homeTeam?.id === teamId || e.awayTeam?.id === teamId
+      );
 
       schedules.push({ team, season, events });
     } catch {
@@ -232,6 +299,7 @@ app.get("/me/schedule", async (req, res) => {
 
   res.json({ schedules });
 });
+
 
 
 // List all sports
@@ -476,6 +544,12 @@ app.post("/me/reset", (req, res) => {
   clearFollows(clientId);
   res.json({ ok: true });
 });
+
+app.get("/me/debug", (req, res) => {
+  const clientId = requireClientId(req);
+  res.json({ clientId, teamIds: getFollows(clientId) });
+});
+
 
 
 app.get("/health", (_req, res) => {
