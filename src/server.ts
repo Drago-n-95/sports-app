@@ -4,6 +4,7 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { getFollows, setFollows, clearFollows } from "./storage";
 
+console.log("DEPLOY VERSION cafc1fc — ME.DEBUG SHOULD EXIST");
 
 console.log("BOOT sports-app-api v1 - server.ts loaded");
 dotenv.config();
@@ -550,6 +551,13 @@ app.get("/me/debug", (req, res) => {
   res.json({ clientId, teamIds: getFollows(clientId) });
 });
 
+app.get("/__version", (_req, res) => {
+  res.json({
+    version: "cafc1fc",
+    hasMeDebug: true,
+    time: new Date().toISOString(),
+  });
+});
 
 
 app.get("/health", (_req, res) => {
