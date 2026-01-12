@@ -4,7 +4,7 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { readFollows, writeFollows } from "./storage";
 
-
+console.log("BOOT sports-app-api v1 - server.ts loaded");
 dotenv.config();
 
 const app = express();
@@ -467,6 +467,10 @@ app.get("/teams/:teamId/hub", async (req, res) => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "sports-app-api", routes: true });
 });
 
 
