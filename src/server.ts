@@ -312,6 +312,12 @@ app.get("/leagues/:leagueId/table", async (req, res) => {
   res.json({ leagueId, season, table });
 });
 
+function requireClientId(req: any): string {
+  const id = req.header("X-Client-Id");
+  if (!id) throw new Error("Missing X-Client-Id header");
+  return id;
+}
+
 
 function normalizePlayer(p: any) {
   return {
@@ -464,6 +470,13 @@ app.get("/teams/:teamId/hub", async (req, res) => {
     },
   });
 });
+
+app.post("/me/reset", (req, res) => {
+  const clientId = requireClientId(req);
+  clearFollows(clientId);
+  res.json({ ok: true });
+});
+
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
