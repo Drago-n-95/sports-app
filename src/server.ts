@@ -465,6 +465,9 @@ app.get("/teams/:teamId/hub", async (req, res) => {
   });
 });
 
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
 
 
 app.listen(PORT, "0.0.0.0", () => {
