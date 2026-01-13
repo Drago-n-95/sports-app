@@ -2,8 +2,7 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
-import { addTeams, clearState, getState, setTeamIds } from "./storage";
-
+import { addTeams, clearState, getState, setTeamIds } from "./storage.js";
 
 
 console.log("DEPLOY VERSION cafc1fc — ME.DEBUG SHOULD EXIST");
@@ -235,7 +234,7 @@ app.get("/me/follows", (req, res) => {
   const state = getState(clientId);
 
   const teams = state.teamIds
-    .map((id) => state.teamsById[id])
+    .map((id: string) => state.teamsById[id])
     .filter(Boolean);
 
   res.json({ teamIds: state.teamIds, teams });
@@ -600,8 +599,9 @@ async function lookupTeamById(id: string) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`SportsDB lookupteam failed: ${res.status}`);
 
-  const json = await res.json();
+  const json = (await res.json()) as { teams?: any[] };
   const t = json?.teams?.[0];
+
 
   // Guard against the “always Arsenal” bug / bad cache
   if (!t || t.idTeam !== id) {
