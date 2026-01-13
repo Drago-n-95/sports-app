@@ -14,7 +14,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3001);
-const API_KEY = process.env.SPORTSDB_API_KEY || "3";
+const API_KEY = process.env.SPORTSDB_API_KEY || "123";
 const BASE = `https://www.thesportsdb.com/api/v1/json/${API_KEY}`;
 
 // --- very small cache (swap with Redis later) ---
@@ -37,13 +37,24 @@ function cacheSet(key: string, value: any, ttlSeconds: number) {
 
 async function get<T>(path: string, ttlSeconds = 300): Promise<T> {
   const url = `${BASE}${path}`;
-  const cached = cacheGet(url);
-  if (cached) return cached as T;
+
+  // TEMP: do not cache lookupteam while debugging
+  const shouldCache = !path.startsWith("/lookupteam.php");
+
+  if (shouldCache) {
+    const cached = cacheGet(url);
+    if (cached) return cached as T;
+  }
 
   const resp = await axios.get<T>(url, { timeout: 10_000 });
-  cacheSet(url, resp.data, ttlSeconds);
+
+  if (shouldCache) {
+    cacheSet(url, resp.data, ttlSeconds);
+  }
+
   return resp.data;
 }
+
 
 // --- Normalizers (keep frontend consistent) ---
 function normalizeTeam(t: any) {
@@ -558,6 +569,18 @@ app.get("/__version", (_req, res) => {
     time: new Date().toISOString(),
   });
 });
+
+app.get("/__config", (_req, res) => {
+  const k = process.env.SPORTSDB_API_KEY || "3";
+  res.json({
+    hasEnvKey: !!process.env.SPORTSDB_API_KEY,
+    keyLooksLikeDemo123: k === "123",
+    keyLength: k.length,
+    baseHost: "www.thesportsdb.com",
+    usingV1: true,
+  });
+});
+
 
 
 app.get("/health", (_req, res) => {
