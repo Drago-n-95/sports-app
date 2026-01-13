@@ -108,23 +108,16 @@ app.get("/teams/search", async (req, res) => {
 });
 
 // 2) Lookup team details by id
-app.get("/teams/:teamId", (req, res) => {
-  const clientId = String(req.header("X-Client-Id") || "").trim();
-  if (!clientId) return res.status(400).json({ error: "Missing X-Client-Id" });
-
-  const teamId = req.params.teamId;
-  const state = getState(clientId);
-  const team = state.teamsById?.[teamId] ?? null;
-
-  if (!team) {
-    return res.status(404).json({
-      error: "Team not found in your follows. Search and follow the team first.",
-      teamId,
-    });
+app.get("/teams/:teamId", async (req, res) => {
+  try {
+    const teamId = String(req.params.teamId);
+    const t = await lookupTeamById(teamId);      // uses mismatch guard
+    return res.json({ team: normalizeTeam(t) });
+  } catch (e: any) {
+    return res.status(404).json({ error: e?.message ?? "Team not found" });
   }
-
-  res.json({ team });
 });
+
 
 
 
