@@ -2,7 +2,8 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
-import { getFollows, setFollows, clearFollows } from "./storage";
+import { addTeams, clearState, getState, setTeamIds } from "./storage";
+
 
 console.log("DEPLOY VERSION cafc1fc — ME.DEBUG SHOULD EXIST");
 
@@ -107,14 +108,25 @@ app.get("/teams/search", async (req, res) => {
 });
 
 // 2) Lookup team details by id
-app.get("/teams/:teamId", async (req, res) => {
+app.get("/teams/:teamId", (req, res) => {
+  const clientId = String(req.header("X-Client-Id") || "").trim();
+  if (!clientId) return res.status(400).json({ error: "Missing X-Client-Id" });
+
   const teamId = req.params.teamId;
-  // TheSportsDB commonly provides lookupteam.php?id=
-  const data = await get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600);
-  const team = data?.teams?.[0] ? normalizeTeam(data.teams[0]) : null;
-  if (!team) return res.status(404).json({ error: "Team not found" });
+  const state = getState(clientId);
+  const team = state.teamsById?.[teamId] ?? null;
+
+  if (!team) {
+    return res.status(404).json({
+      error: "Team not found in your follows. Search and follow the team first.",
+      teamId,
+    });
+  }
+
   res.json({ team });
 });
+
+
 
 // 3) Next events for team (Upcoming games)
 app.get("/teams/:teamId/events/next", async (req, res) => {
@@ -141,12 +153,19 @@ app.get("/teams/:teamId/schedule", async (req, res) => {
   if (!season) return res.status(400).json({ error: "Missing query param: season" });
 
   // 1) lookup team to get leagueId
-  const teamData = await get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600);
-  const t = teamData?.teams?.[0];
-  if (!t) return res.status(404).json({ error: "Team not found" });
+  const clientId = String(req.header("X-Client-Id") || "").trim();
+  const state = clientId ? store[clientId] : null;
+  const team = state?.teamsById?.[teamId];
 
-  const team = normalizeTeam(t);
+  if (!team) {
+    return res.status(404).json({
+      error: "Team not found in user store. Follow/search the team first.",
+      teamId,
+    });
+  }
+
   const leagueId = team.leagueId;
+
 
   // 2) fetch season events by LEAGUE ID (documented)
   const seasonData = await get<any>(
@@ -162,6 +181,13 @@ app.get("/teams/:teamId/schedule", async (req, res) => {
 
   res.json({ team, season, leagueId, events, note: "Free key may return limited events." });
 });
+
+type FollowState = {
+  teamIds: string[];
+  teamsById: Record<string, any>; // normalized team
+};
+
+const store: Record<string, FollowState> = {};
 
 
 // Replace entire follows API with per-client follows
@@ -182,86 +208,62 @@ app.post("/me/follows", (req, res) => {
 
 // ADD followed teams (appends)
 app.post("/me/follows/add", (req, res) => {
-  const clientId = requireClientId(req);
-  const teamIds = req.body?.teamIds;
+  const clientId = String(req.header("X-Client-Id") || "").trim();
+  if (!clientId) return res.status(400).json({ error: "Missing X-Client-Id" });
 
-  if (!Array.isArray(teamIds)) {
-    return res.status(400).json({ error: "Body must be { teamIds: string[] }" });
-  }
+  const teamsRaw = Array.isArray(req.body?.teams) ? req.body.teams : [];
+  if (!teamsRaw.length) return res.status(400).json({ error: "Missing body.teams[]" });
 
-  const current = getFollows(clientId);
-  setFollows(clientId, [...current, ...teamIds.map(String)]);
-  res.json({ ok: true, teamIds: getFollows(clientId) });
+  const normalized = teamsRaw.map(normalizeTeam);
+  addTeams(clientId, normalized);
+
+  const state = getState(clientId);
+  res.json({ ok: true, teamIds: state.teamIds });
 });
 
-// GET followed teams (IDs + team objects)
-app.get("/me/follows", async (req, res) => {
+
+
+app.get("/me/follows", (req, res) => {
   const clientId = requireClientId(req);
-  const teamIds = getFollows(clientId);
+  const state = getState(clientId);
 
-  const teams: any[] = [];
-  for (const id of teamIds) {
-    try {
-      const data = await get<any>(`/lookupteam.php?id=${encodeURIComponent(id)}`, 3600);
-      const t = data?.teams?.[0];
-      if (t) teams.push(normalizeTeam(t));
-    } catch {
-      // ignore
-    }
-  }
+  const teams = state.teamIds
+    .map((id) => state.teamsById[id])
+    .filter(Boolean);
 
-  res.json({ teamIds, teams });
+  res.json({ teamIds: state.teamIds, teams });
 });
+
 
 
 // Aggregated "feed" for Schedule tab: last + next per followed team
 app.get("/me/feed", async (req, res) => {
   try {
     const clientId = requireClientId(req);
-    const teamIds = getFollows(clientId);
+    const state = getState(clientId);
 
-    if (!teamIds.length) return res.json({ items: [] });
+    if (!state.teamIds.length) return res.json({ items: [] });
 
     const season = String(req.query.season || "2025-2026").trim();
+    const items: any[] = [];
 
-    const items = [];
-
-    for (const teamId of teamIds) {
-      // 1) Team details
-      const teamData = await get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600);
-      const t = teamData?.teams?.[0];
-      if (!t) {
-        items.push({ team: { id: teamId }, next: null, last: null });
+    for (const teamId of state.teamIds) {
+      const team = state.teamsById[teamId];
+      if (!team) {
+        items.push({ team: { id: teamId, name: "Unknown" }, next: [], last: [] });
         continue;
       }
-      const team = normalizeTeam(t);
 
-      // 2) League season events (then FILTER to this team)
-      const seasonData = await get<any>(
-        `/eventsseason.php?id=${encodeURIComponent(team.leagueId)}&s=${encodeURIComponent(season)}`,
-        900
-      );
+      // Use teamId directly for next/last (does NOT require lookupteam)
+      const [nextData, lastData] = await Promise.all([
+        get<any>(`/eventsnext.php?id=${encodeURIComponent(teamId)}`, 120).catch(() => ({})),
+        get<any>(`/eventslast.php?id=${encodeURIComponent(teamId)}`, 300).catch(() => ({})),
+      ]);
 
-      const eventsAll = (seasonData?.events || []).map(normalizeEvent);
-      const events = eventsAll.filter(
-        (e: any) => e.homeTeam?.id === teamId || e.awayTeam?.id === teamId
-      );
+      const next = (nextData?.events || []).map(normalizeEvent);
+      const last = (lastData?.results || lastData?.events || []).map(normalizeEvent);
 
-      // 3) Compute last + next (single events)
-      const parsed = events
-        .map((e: any) => {
-          const time = (e.time || "00:00:00").slice(0, 8);
-          const dt = e.date ? new Date(`${e.date}T${time}`) : null;
-          return { ...e, dt };
-        })
-        .filter((e: any) => e.dt && !isNaN(e.dt.getTime()))
-        .sort((a: any, b: any) => a.dt.getTime() - b.dt.getTime());
-
-      const now = new Date();
-      const next = parsed.find((e: any) => e.dt >= now) ?? null;
-      const last = [...parsed].reverse().find((e: any) => e.dt < now) ?? null;
-
-      items.push({ team, next, last });
+      items.push({ team, next, last, season });
     }
 
     res.json({ items });
@@ -269,6 +271,7 @@ app.get("/me/feed", async (req, res) => {
     res.status(500).json({ error: e?.message ?? String(e) });
   }
 });
+
 
 
 
@@ -553,7 +556,7 @@ app.get("/teams/:teamId/hub", async (req, res) => {
 
 app.post("/me/reset", (req, res) => {
   const clientId = requireClientId(req);
-  clearFollows(clientId);
+  clearState(clientId);
   res.json({ ok: true });
 });
 
@@ -580,6 +583,25 @@ app.get("/__config", (_req, res) => {
     usingV1: true,
   });
 });
+
+async function lookupTeamById(id: string) {
+  const key = process.env.SPORTSDB_API_KEY ?? "123"; // free key fallback
+  const url = `https://www.thesportsdb.com/api/v1/json/${key}/lookupteam.php?id=${encodeURIComponent(id)}&_=${Date.now()}`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`SportsDB lookupteam failed: ${res.status}`);
+
+  const json = await res.json();
+  const t = json?.teams?.[0];
+
+  // Guard against the “always Arsenal” bug / bad cache
+  if (!t || t.idTeam !== id) {
+    throw new Error(
+      `SportsDB lookupteam mismatch (wanted ${id}, got ${t?.idTeam ?? "none"})`
+    );
+  }
+  return t;
+}
 
 
 
