@@ -571,7 +571,7 @@ app.get("/__version", (_req, res) => {
 });
 
 app.get("/__config", (_req, res) => {
-  const k = process.env.SPORTSDB_API_KEY || "3";
+  const k = process.env.SPORTSDB_API_KEY || "123";
   res.json({
     hasEnvKey: !!process.env.SPORTSDB_API_KEY,
     keyLooksLikeDemo123: k === "123",
