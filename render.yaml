@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: sports-app-api
+    env: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: SPORTSDB_API_KEY
+        sync: false
+
