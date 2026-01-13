@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { addTeams, clearState, getState, setTeamIds } from "./storage";
 
 
+
 console.log("DEPLOY VERSION cafc1fc — ME.DEBUG SHOULD EXIST");
 
 console.log("BOOT sports-app-api v1 - server.ts loaded");
@@ -197,13 +198,18 @@ const store: Record<string, FollowState> = {};
 // SET followed teams (overwrites)
 app.post("/me/follows", (req, res) => {
   const clientId = requireClientId(req);
-  const teamIds = req.body?.teamIds;
+
+  const teamIds = (req.body as any)?.teamIds;
   if (!Array.isArray(teamIds)) {
     return res.status(400).json({ error: "Body must be { teamIds: string[] }" });
   }
-  setFollows(clientId, teamIds.map(String));
-  res.json({ ok: true, teamIds: getFollows(clientId) });
+
+  setTeamIds(clientId, teamIds.map(String));
+  const state = getState(clientId);
+
+  res.json({ ok: true, teamIds: state.teamIds });
 });
+
 
 
 // ADD followed teams (appends)
@@ -211,7 +217,8 @@ app.post("/me/follows/add", (req, res) => {
   const clientId = String(req.header("X-Client-Id") || "").trim();
   if (!clientId) return res.status(400).json({ error: "Missing X-Client-Id" });
 
-  const teamsRaw = Array.isArray(req.body?.teams) ? req.body.teams : [];
+  const body = req.body as any;
+  const teamsRaw = Array.isArray(body?.teams) ? body.teams : [];
   if (!teamsRaw.length) return res.status(400).json({ error: "Missing body.teams[]" });
 
   const normalized = teamsRaw.map(normalizeTeam);
@@ -280,7 +287,8 @@ app.get("/me/schedule", async (req, res) => {
   const season = String(req.query.season || "").trim();
   if (!season) return res.status(400).json({ error: "Missing query param: season" });
 
-  const teamIds = getFollows(clientId);
+  const state = getState(clientId);
+  const teamIds = state.teamIds;
   const schedules = [];
 
   for (const teamId of teamIds) {
@@ -482,8 +490,8 @@ app.get("/teams/:teamId/hub", async (req, res) => {
   const season = String(req.query.season || "").trim(); // optional
 
   // Team core info
-  const teamData = await get<any>(`/lookupteam.php?id=${encodeURIComponent(teamId)}`, 3600);
-  const t = teamData?.teams?.[0];
+  const t = await lookupTeamById(teamId);
+
   if (!t) return res.status(404).json({ error: "Team not found" });
   const team = normalizeTeam(t);
 
@@ -562,7 +570,8 @@ app.post("/me/reset", (req, res) => {
 
 app.get("/me/debug", (req, res) => {
   const clientId = requireClientId(req);
-  res.json({ clientId, teamIds: getFollows(clientId) });
+  const state = getState(clientId);
+  res.json({ clientId, teamIds: state.teamIds });
 });
 
 app.get("/__version", (_req, res) => {
